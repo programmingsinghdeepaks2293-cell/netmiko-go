@@ -35,26 +35,28 @@ func StripCommand(command, response string) string {
 
 	// Check if first line matches or contains command
 	firstLine := strings.TrimSpace(lines[0])
-	if strings.Contains(firstLine, cmdNorm) {
+	if cmdNorm != "" && strings.Contains(firstLine, cmdNorm) {
 		return strings.Join(lines[1:], "\n")
 	}
 	return respNorm
 }
 
-// StripPrompt removes the trailing prompt from command output.
+// StripPrompt removes a trailing prompt line from output, using a heuristic: the
+// last non-empty line is treated as a prompt if it is a single token ending in
+// #, >, $ or %. Prefer the pattern-based cleanup used by SendCommand when a
+// prompt pattern is known.
 func StripPrompt(response string) string {
 	respNorm := NormalizeLinebreaks(response)
 	lines := strings.Split(respNorm, "\n")
-	if len(lines) <= 1 {
-		return response
+	idx := lastNonEmptyLine(lines)
+	if idx < 0 {
+		return respNorm
 	}
-
-	// Drop last line if it resembles a prompt (e.g. ends with #, >, $)
-	last := strings.TrimSpace(lines[len(lines)-1])
-	if strings.HasSuffix(last, "#") || strings.HasSuffix(last, ">") || strings.HasSuffix(last, "$") || strings.HasSuffix(last, "%") {
-		return strings.Join(lines[:len(lines)-1], "\n")
+	last := strings.TrimSpace(lines[idx])
+	if strings.ContainsAny(last, " \t") || !strings.ContainsAny(last[len(last)-1:], "#>$%") {
+		return respNorm
 	}
-	return respNorm
+	return strings.Join(lines[:idx], "\n")
 }
 
 // CleanOutput combines ANSI stripping, command stripping, and prompt stripping.
@@ -68,4 +70,31 @@ func CleanOutput(command, output string, stripCmd, stripPmt bool) string {
 		out = StripPrompt(out)
 	}
 	return strings.TrimSpace(out)
+}
+
+// cleanWithPattern removes the echoed command and, if the last line matches the
+// prompt pattern that terminated the read, that prompt line.
+func cleanWithPattern(command, raw string, stripCmd, stripPmt bool, prompt *regexp.Regexp) string {
+	out := NormalizeLinebreaks(StripAnsi(raw))
+	if stripCmd {
+		out = StripCommand(command, out)
+	}
+	if stripPmt && prompt != nil {
+		lines := strings.Split(out, "\n")
+		idx := lastNonEmptyLine(lines)
+		if idx >= 0 && prompt.MatchString(strings.TrimSpace(lines[idx])) {
+			out = strings.Join(lines[:idx], "\n")
+		}
+	}
+	return strings.TrimSpace(out)
+}
+
+// lastNonEmptyLine returns the index of the last line that is not blank, or -1.
+func lastNonEmptyLine(lines []string) int {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return i
+		}
+	}
+	return -1
 }

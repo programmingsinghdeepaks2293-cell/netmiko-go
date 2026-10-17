@@ -70,7 +70,7 @@ func (c *CiscoBase) Enable() error {
 		if secret == "" {
 			return errors.New("enable password required but secret/password is empty")
 		}
-		if err := c.WriteChannel(secret + "\n"); err != nil {
+		if err := c.WriteChannelSensitive(secret + "\n"); err != nil {
 			return err
 		}
 		_, err = c.ReadUntilPrompt(10 * time.Second)

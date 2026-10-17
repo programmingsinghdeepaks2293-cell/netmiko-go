@@ -73,3 +73,10 @@ func (xr *CiscoXR) Connect(ctx context.Context) error {
 func (xr *CiscoXR) Commit() (string, error) {
 	return xr.SendCommand("commit")
 }
+
+// Compile-time checks that every driver satisfies netmiko.Connection.
+var (
+	_ netmiko.Connection = (*CiscoIOS)(nil)
+	_ netmiko.Connection = (*CiscoNXOS)(nil)
+	_ netmiko.Connection = (*CiscoXR)(nil)
+)

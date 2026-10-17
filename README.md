@@ -1,21 +1,7 @@
 # Netmiko Go (`netmiko-go`)
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/netmiko-go/netmiko.svg)](https://pkg.go.dev/github.com/netmiko-go/netmiko)
-[![Go Report Card](https://goreportcard.com/badge/github.com/netmiko-go/netmiko)](https://goreportcard.com/report/github.com/netmiko-go/netmiko)
-
-A fast, idiomatic, concurrent Golang port of Kirk Byers' popular **[Netmiko](https://github.com/ktbyers/netmiko)** library for multi-vendor network device automation over interactive SSH channels.
-
----
-
-## Overview
-
-Netmiko simplifies terminal-based screen-scraping and CLI automation across heterogeneous network hardware (switches, routers, firewalls, and Unix systems).
-
-`netmiko-go` brings the familiar API and battle-tested CLI interaction workflows of Python Netmiko into Go, offering:
-- **Zero-Dependency Native Binaries**: Compile your network automation scripts into single, lightweight binaries.
-- **High Concurrency**: Run thousands of simultaneous device connections efficiently using Go goroutines without Python GIL or multi-processing overhead.
-- **Type Safety**: Strongly typed device parameters and command option builders.
-- **In-Memory Testing**: Includes terminal emulator mocks for deterministic unit testing without live network switches.
+A concurrent Go port of Kirk Byers' [Netmiko](https://github.com/ktbyers/netmiko) library for multi-vendor
+network device automation over interactive SSH channels.
 
 ---
 
@@ -23,14 +9,14 @@ Netmiko simplifies terminal-based screen-scraping and CLI automation across hete
 
 | Driver Identifier | Vendor / Platform | Supported Features |
 |---|---|---|
-| `cisco_ios` | Cisco IOS | CLI, Enable, Config Mode, Paging Disabling |
-| `cisco_xe` | Cisco IOS-XE | CLI, Enable, Config Mode, Paging Disabling |
+| `cisco_ios` | Cisco IOS | CLI, Enable, Config Mode, Paging Disabling, SaveConfig |
+| `cisco_xe` | Cisco IOS-XE | Same as `cisco_ios` |
 | `cisco_nxos` | Cisco Nexus (NX-OS) | CLI, Enable, Config Mode, Terminal Length |
 | `cisco_xr` | Cisco IOS-XR | CLI, Enable, Config Mode, Commit |
 | `arista_eos` | Arista EOS | CLI, Enable, Config Mode, High Terminal Width |
-| `juniper_junos` | Juniper JunOS | CLI, Operational & Config Mode, Commit |
-| `juniper` | Juniper JunOS Alias | CLI, Operational & Config Mode, Commit |
-| `linux` | Linux / Unix Servers | Interactive Bash/Shell, PTY Disabling |
+| `juniper_junos` | Juniper JunOS | CLI, Operational & Config Mode, SendConfigSet, Commit |
+| `juniper` | Juniper JunOS alias | Same as `juniper_junos` |
+| `linux` | Linux / Unix servers | Interactive shell, PTY disabling. SendConfigSet returns `ErrNotSupported` |
 
 ---
 
@@ -39,6 +25,16 @@ Netmiko simplifies terminal-based screen-scraping and CLI automation across hete
 ```bash
 go get github.com/netmiko-go/netmiko
 ```
+
+---
+
+## Security: host key verification
+
+Host keys are verified by default against an OpenSSH `known_hosts` file. Set
+`Device.KnownHostsPath`, or leave it empty to use `~/.ssh/known_hosts`. If the file can't be loaded, `Connect`
+fails. To skip verification on a network you trust, set `Device.InsecureIgnoreHostKey: true`.
+
+Passwords and the enable secret are never written to `Device.SessionLog`.
 
 ---
 
@@ -61,13 +57,14 @@ import (
 
 func main() {
 	device := netmiko.Device{
-		DeviceType: "cisco_ios",
-		Host:       "192.168.1.1",
-		Port:       22,
-		Username:   "admin",
-		Password:   "cisco123",
-		Secret:     "enableSecret",
-		Timeout:    30 * time.Second,
+		DeviceType:     "cisco_ios",
+		Host:           "192.168.1.1",
+		Port:           22,
+		Username:       "admin",
+		Password:       "cisco123",
+		Secret:         "enableSecret",
+		Timeout:        30 * time.Second,
+		KnownHostsPath: "/home/me/.ssh/known_hosts",
 	}
 
 	netConnect, err := netmiko.ConnectHandler(device)
@@ -75,23 +72,21 @@ func main() {
 		log.Fatalf("ConnectHandler error: %v", err)
 	}
 
+	// ctx bounds the whole session: cancelling it aborts the connection and later calls fail.
 	ctx := context.Background()
 	if err := netConnect.Connect(ctx); err != nil {
 		log.Fatalf("Connection failed: %v", err)
 	}
 	defer netConnect.Disconnect()
 
-	// Ensure Privileged EXEC mode (#)
 	if err := netConnect.Enable(); err != nil {
 		log.Fatalf("Enable failed: %v", err)
 	}
 
-	// Send show command
 	output, err := netConnect.SendCommand("show ip interface brief")
 	if err != nil {
 		log.Fatalf("SendCommand error: %v", err)
 	}
-
 	fmt.Println(output)
 }
 ```
@@ -112,74 +107,64 @@ output, err := netConnect.SendConfigSet(commands)
 if err != nil {
 	log.Fatalf("SendConfigSet failed: %v", err)
 }
-
 fmt.Println("Config output:\n", output)
 ```
 
+On JunOS, `SendConfigSet` takes `set`/`delete` statements, stages them, and returns to operational mode. Call
+`Commit()` afterwards to apply them.
+
 ---
 
-### 3. Concurrent Multi-Device Automation with Goroutines (`ExecuteConcurrently`)
-
-Automate hundreds of network switches concurrently using a built-in goroutine worker pool:
+### 3. Concurrent Multi-Device Automation (`ExecuteConcurrently`)
 
 ```go
 switches := []netmiko.Device{
-    {DeviceType: "cisco_ios", Host: "10.0.0.1", Username: "admin", Password: "pwd"},
-    {DeviceType: "cisco_ios", Host: "10.0.0.2", Username: "admin", Password: "pwd"},
-    {DeviceType: "arista_eos", Host: "10.0.0.3", Username: "admin", Password: "pwd"},
+	{DeviceType: "cisco_ios", Host: "10.0.0.1", Username: "admin", Password: "pwd", KnownHostsPath: kh},
+	{DeviceType: "cisco_ios", Host: "10.0.0.2", Username: "admin", Password: "pwd", KnownHostsPath: kh},
+	{DeviceType: "arista_eos", Host: "10.0.0.3", Username: "admin", Password: "pwd", KnownHostsPath: kh},
 }
 
 ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 defer cancel()
 
-// Run with up to 50 concurrent goroutines
+// Up to 50 devices at a time
 results := netmiko.ExecuteConcurrently(ctx, switches, 50, func(conn netmiko.Connection) (string, error) {
-    return conn.SendCommand("show version")
+	return conn.SendCommand("show version")
 })
 
-for host, res := range results {
-    if res.Err != nil {
-        log.Printf("Host %s failed: %v", host, res.Err)
-        continue
-    }
-    fmt.Printf("Host %s took %v\n", host, res.Duration)
+for key, res := range results { // key is "host:port"
+	if res.Err != nil {
+		log.Printf("%s failed: %v", key, res.Err)
+		continue
+	}
+	fmt.Printf("%s took %v\n", key, res.Duration)
 }
 ```
+
+Results are keyed by `host:port`, and every device gets an entry. A device that was never started because `ctx`
+was cancelled has `Err` set to the context error. A panic in one device's task is reported as that device's error.
 
 ---
 
-### 4. Structured Data Parsing with TextFSM & NTC Templates
-
-Convert unstructured CLI text into strongly typed slices of maps (`[]map[string]any`) using TextFSM templates:
+### 4. Structured Parsing with TextFSM & NTC Templates
 
 ```go
-template := `Value Required Interface (\S+)
-Value IPAddress (\S+)
-Value Status (up|down)
-Value Protocol (up|down)
-
-Start
-  ^${Interface}\s+${IPAddress}\s+\S+\s+\S+\s+${Status}\s+${Protocol} -> Record
-`
-
-// Parse command output directly with template
-records, err := conn.SendCommandStructured("show ip int br", template)
+records, err := conn.SendCommandStructured("show ip interface brief", template)
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
-
 for _, row := range records {
-    fmt.Printf("Interface %s has IP %s (Status: %s)\n", row["Interface"], row["IPAddress"], row["Status"])
+	fmt.Printf("Interface %s has IP %s (Status: %s)\n", row["Interface"], row["IPAddress"], row["Status"])
 }
 ```
 
-You can also point to an external NTC-templates directory by setting the `NET_TEXTFSM` environment variable (e.g., `NET_TEXTFSM=/path/to/ntc-templates/templates`).
+Without an explicit template, `SendCommandStructured` looks up the NTC template in the directory given by the
+`NET_TEXTFSM` environment variable (for example `NET_TEXTFSM=/path/to/ntc-templates/templates`). The lookup uses
+the NTC `index` file, so abbreviated commands such as `show ip interface brief` resolve correctly.
 
 ---
 
 ### 5. Session Logging
-
-You can capture all raw input and output streams for auditing or debugging by setting `SessionLog`:
 
 ```go
 logFile, _ := os.Create("session.log")
@@ -194,11 +179,22 @@ device := netmiko.Device{
 }
 ```
 
+The log contains device output and the commands you send. Secrets (the password and the enable secret) are not
+logged. Commands are logged as written, so avoid sending secrets through `SendCommand`.
+
+---
+
+## Concurrency
+
+A connection is not safe for concurrent use. Give each goroutine its own connection, or use `ExecuteConcurrently`,
+which does this for you.
+
 ---
 
 ## Running Tests
 
-Netmiko Go includes an interactive in-memory terminal emulator that simulates realistic device prompt negotiation, enable password challenges, and configuration commands:
+The tests use an in-memory terminal emulator for Cisco IOS, Arista, and JunOS-style sessions, plus a silent
+transport for timeout tests. No live devices are required.
 
 ```bash
 go test -v ./...

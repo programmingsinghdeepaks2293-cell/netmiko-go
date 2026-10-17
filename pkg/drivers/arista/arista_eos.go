@@ -37,3 +37,5 @@ func (a *AristaEOS) DisablePaging() error {
 	_, err = a.SendCommand("terminal width 32767")
 	return err
 }
+
+var _ netmiko.Connection = (*AristaEOS)(nil)

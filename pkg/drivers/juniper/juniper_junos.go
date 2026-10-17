@@ -3,12 +3,16 @@ package juniper
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/netmiko-go/netmiko/pkg/netmiko"
 )
+
+// junosConfigPromptRe matches a Junos configuration-mode prompt, which ends in "#".
+var junosConfigPromptRe = regexp.MustCompile(`[^\r\n]*#\s*$`)
 
 // JuniperJunos implements the Netmiko driver for Juniper JunOS devices.
 type JuniperJunos struct {
@@ -20,6 +24,8 @@ func NewJuniperJunos(dev netmiko.Device) *JuniperJunos {
 	bc.DefaultPromptTerm = ">"
 	return &JuniperJunos{BaseConnection: bc}
 }
+
+var _ netmiko.Connection = (*JuniperJunos)(nil)
 
 func (j *JuniperJunos) Connect(ctx context.Context) error {
 	if err := j.BaseConnection.Connect(ctx); err != nil {
@@ -64,13 +70,52 @@ func (j *JuniperJunos) ExitConfigMode() error {
 	return err
 }
 
-// CheckConfigMode checks if currently in configuration mode ([edit ...]#).
+// CheckConfigMode reports whether the prompt indicates configuration mode (ends in "#").
 func (j *JuniperJunos) CheckConfigMode() (bool, error) {
 	prompt, err := j.FindPrompt()
 	if err != nil {
 		return false, err
 	}
 	return strings.HasSuffix(prompt, "#"), nil
+}
+
+// SendConfigSet enters configuration mode, applies each set/delete statement, and
+// returns to operational mode. Changes are staged but not committed; call Commit
+// afterwards to apply them.
+func (j *JuniperJunos) SendConfigSet(commands []string, opts ...netmiko.ConfigOption) (string, error) {
+	var o netmiko.ConfigOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	timeout := o.ReadTimeout
+	if timeout <= 0 {
+		timeout = j.Device.Timeout
+	}
+
+	if err := j.ConfigMode(); err != nil {
+		return "", fmt.Errorf("failed to enter configuration mode: %w", err)
+	}
+
+	var out strings.Builder
+	for _, cmd := range commands {
+		if strings.TrimSpace(cmd) == "" {
+			continue
+		}
+		if err := j.WriteChannel(cmd + "\n"); err != nil {
+			return netmiko.CleanOutput("", out.String(), false, true), err
+		}
+		res, err := j.ReadUntilPattern(junosConfigPromptRe, timeout)
+		out.WriteString(res)
+		if err != nil {
+			_ = j.ExitConfigMode()
+			return netmiko.CleanOutput("", out.String(), false, true), fmt.Errorf("config command %q failed: %w", cmd, err)
+		}
+	}
+
+	if err := j.ExitConfigMode(); err != nil {
+		return netmiko.CleanOutput("", out.String(), false, true), fmt.Errorf("failed to exit configuration mode: %w", err)
+	}
+	return netmiko.CleanOutput("", out.String(), false, true), nil
 }
 
 // Commit commits configuration changes.

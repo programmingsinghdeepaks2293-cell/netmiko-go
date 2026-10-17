@@ -17,29 +17,63 @@ type MockTerminal struct {
 	Hostname     string
 	InPrivileged bool
 	InConfig     bool
-	closed       bool
-	readNotify   chan struct{}
+	// FixedPrompt, when set, is used verbatim as the prompt (e.g. "ubuntu@srv:~$ ").
+	FixedPrompt string
+	// Junos switches the terminal to JunOS-style prompts and commands.
+	Junos bool
+
+	awaitingPassword bool
+	closed           bool
+	readNotify       chan struct{}
+}
+
+func newMockTerminal(hostname string) *MockTerminal {
+	return &MockTerminal{
+		Hostname:   hostname,
+		readNotify: make(chan struct{}, 100),
+	}
 }
 
 // NewMockCiscoTerminal creates a mock terminal pre-configured like a Cisco IOS switch.
 func NewMockCiscoTerminal(hostname string) *MockTerminal {
-	m := &MockTerminal{
-		Hostname:     hostname,
-		InPrivileged: false,
-		InConfig:     false,
-		readNotify:   make(chan struct{}, 100),
-	}
+	m := newMockTerminal(hostname)
+	m.updatePrompt()
+	m.emit(m.Prompt)
+	return m
+}
+
+// NewMockJunosTerminal creates a mock terminal that behaves like a JunOS CLI.
+// Pass the login and host as hostname, e.g. "user@junos-router".
+func NewMockJunosTerminal(hostname string) *MockTerminal {
+	m := newMockTerminal(hostname)
+	m.Junos = true
+	m.updatePrompt()
+	m.emit(m.Prompt)
+	return m
+}
+
+// NewMockTerminalWithPrompt creates a mock terminal that always shows the given prompt.
+func NewMockTerminalWithPrompt(prompt string) *MockTerminal {
+	m := newMockTerminal("")
+	m.FixedPrompt = prompt
 	m.updatePrompt()
 	m.emit(m.Prompt)
 	return m
 }
 
 func (m *MockTerminal) updatePrompt() {
-	if m.InConfig {
-		m.Prompt = m.Hostname + "(config)# "
-	} else if m.InPrivileged {
+	switch {
+	case m.FixedPrompt != "":
+		m.Prompt = m.FixedPrompt
+	case m.Junos && m.InConfig:
 		m.Prompt = m.Hostname + "# "
-	} else {
+	case m.Junos:
+		m.Prompt = m.Hostname + "> "
+	case m.InConfig:
+		m.Prompt = m.Hostname + "(config)# "
+	case m.InPrivileged:
+		m.Prompt = m.Hostname + "# "
+	default:
 		m.Prompt = m.Hostname + "> "
 	}
 }
@@ -54,8 +88,6 @@ func (m *MockTerminal) emit(data string) {
 
 func (m *MockTerminal) Read(p []byte) (n int, err error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.outBuf.Len() == 0 && !m.closed {
 		m.mu.Unlock()
 		select {
@@ -64,6 +96,7 @@ func (m *MockTerminal) Read(p []byte) (n int, err error) {
 		}
 		m.mu.Lock()
 	}
+	defer m.mu.Unlock()
 
 	if m.outBuf.Len() == 0 {
 		if m.closed {
@@ -71,7 +104,6 @@ func (m *MockTerminal) Read(p []byte) (n int, err error) {
 		}
 		return 0, nil
 	}
-
 	return m.outBuf.Read(p)
 }
 
@@ -86,16 +118,14 @@ func (m *MockTerminal) Write(p []byte) (n int, err error) {
 	m.inBuf.Write(p)
 	data := m.inBuf.String()
 
-	// Check if a newline was sent (command completed)
+	// Process each complete line; keep any trailing partial line buffered.
 	if strings.Contains(data, "\n") {
 		parts := strings.Split(data, "\n")
-		// The last part might be incomplete input
 		m.inBuf.Reset()
 		m.inBuf.WriteString(parts[len(parts)-1])
 
 		for _, cmdLine := range parts[:len(parts)-1] {
-			cmd := strings.TrimSpace(cmdLine)
-			m.handleCommand(cmd)
+			m.handleCommand(strings.TrimSpace(cmdLine))
 		}
 	}
 
@@ -103,8 +133,22 @@ func (m *MockTerminal) Write(p []byte) (n int, err error) {
 }
 
 func (m *MockTerminal) handleCommand(cmd string) {
-	// Echo the command back as terminal emulator would
+	if m.awaitingPassword {
+		// Real devices do not echo the enable secret back.
+		m.awaitingPassword = false
+		m.InPrivileged = true
+		m.updatePrompt()
+		m.emit("\r\n" + m.Prompt)
+		return
+	}
+
+	// Echo the command back as a terminal emulator would
 	m.emit(cmd + "\r\n")
+
+	if m.Junos {
+		m.handleJunos(cmd)
+		return
+	}
 
 	switch {
 	case cmd == "":
@@ -113,12 +157,9 @@ func (m *MockTerminal) handleCommand(cmd string) {
 		if m.InPrivileged {
 			m.emit(m.Prompt)
 		} else {
+			m.awaitingPassword = true
 			m.emit("Password: ")
 		}
-	case cmd == "cisco" || cmd == "secret": // password entered
-		m.InPrivileged = true
-		m.updatePrompt()
-		m.emit("\r\n" + m.Prompt)
 	case cmd == "disable":
 		m.InPrivileged = false
 		m.InConfig = false
@@ -132,10 +173,8 @@ func (m *MockTerminal) handleCommand(cmd string) {
 		if m.InConfig {
 			m.InConfig = false
 			m.updatePrompt()
-			m.emit(m.Prompt)
-		} else {
-			m.emit(m.Prompt)
 		}
+		m.emit(m.Prompt)
 	case strings.HasPrefix(cmd, "show ip int br") || strings.HasPrefix(cmd, "show ip interface brief"):
 		m.emit("Interface              IP-Address      OK? Method Status                Protocol\r\n")
 		m.emit("GigabitEthernet0/0     192.168.1.1     YES manual up                    up\r\n")
@@ -147,6 +186,26 @@ func (m *MockTerminal) handleCommand(cmd string) {
 		m.emit(m.Prompt)
 	default:
 		// Generic command response
+		m.emit("Output for " + cmd + "\r\n" + m.Prompt)
+	}
+}
+
+// handleJunos implements the subset of JunOS CLI behavior the drivers rely on.
+func (m *MockTerminal) handleJunos(cmd string) {
+	switch {
+	case cmd == "":
+		m.emit("\r\n" + m.Prompt)
+	case cmd == "configure":
+		m.InConfig = true
+		m.updatePrompt()
+		m.emit("Entering configuration mode\r\n" + m.Prompt)
+	case cmd == "exit" || cmd == "quit":
+		if m.InConfig {
+			m.InConfig = false
+			m.updatePrompt()
+		}
+		m.emit(m.Prompt)
+	default:
 		m.emit("Output for " + cmd + "\r\n" + m.Prompt)
 	}
 }

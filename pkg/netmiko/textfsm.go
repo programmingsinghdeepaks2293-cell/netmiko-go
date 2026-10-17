@@ -1,10 +1,13 @@
 package netmiko
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/sirikothe/gotextfsm"
 )
@@ -41,35 +44,118 @@ func ParseTextFSMFile(templateFilePath string, rawOutput string) ([]map[string]a
 	return ParseTextFSM(string(data), rawOutput)
 }
 
-// FindNTCTemplate searches the NET_TEXTFSM directory or NTC-templates directory for a matching template.
-//
-// Template filenames typically follow: <platform>_<command_with_underscores>.textfsm
-// e.g. cisco_ios_show_ip_int_brief.textfsm
+// ntcIndexEntry is one row of an NTC-templates "index" file.
+type ntcIndexEntry struct {
+	template string
+	platform string
+	command  *regexp.Regexp
+}
+
+var (
+	ntcMu         sync.Mutex
+	ntcCache      = map[string][]ntcIndexEntry{}
+	ntcOptionalRe = regexp.MustCompile(`\[\[([^\]]+)\]\]`)
+)
+
+// ntcTemplateDir returns NET_TEXTFSM, or the default ~/ntc-templates location if it exists.
+func ntcTemplateDir() (string, error) {
+	if dir := os.Getenv("NET_TEXTFSM"); dir != "" {
+		return dir, nil
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, "ntc-templates", "ntc_templates", "templates")
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("NET_TEXTFSM directory not found; set NET_TEXTFSM to the NTC templates directory")
+}
+
+// normalizeNTCPlatform maps Netmiko device types to NTC platform names.
+func normalizeNTCPlatform(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if p == "juniper" {
+		return "juniper_junos"
+	}
+	return p
+}
+
+// normalizeCommand lowercases a command and collapses runs of whitespace.
+func normalizeCommand(c string) string {
+	return strings.ToLower(strings.Join(strings.Fields(c), " "))
+}
+
+// loadNTCIndex parses the "index" file in an NTC templates directory. NTC index
+// commands use "[[xyz]]" to mark optional completions, e.g. "sh[[ow]] ip int[[erface]] br[[ief]]".
+func loadNTCIndex(dir string) ([]ntcIndexEntry, error) {
+	ntcMu.Lock()
+	defer ntcMu.Unlock()
+
+	if entries, ok := ntcCache[dir]; ok {
+		return entries, nil
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "index"))
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []ntcIndexEntry
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, ",", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		tmpl := strings.TrimSpace(parts[0])
+		if strings.EqualFold(tmpl, "template") {
+			continue // header row
+		}
+		platform := strings.ToLower(strings.TrimSpace(parts[2]))
+		pattern := ntcOptionalRe.ReplaceAllString(normalizeCommand(parts[3]), "(?:${1})?")
+		re, err := regexp.Compile("^(?:" + pattern + ")$")
+		if err != nil {
+			continue
+		}
+		entries = append(entries, ntcIndexEntry{template: tmpl, platform: platform, command: re})
+	}
+
+	ntcCache[dir] = entries
+	return entries, nil
+}
+
+// FindNTCTemplate finds the NTC template for a platform and command. It consults
+// the NTC index first, so abbreviated commands such as "show ip interface brief"
+// resolve to cisco_ios_show_ip_int_brief.textfsm, and falls back to a filename match.
 func FindNTCTemplate(platform, command string) (string, error) {
-	templateDir := os.Getenv("NET_TEXTFSM")
-	if templateDir == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			candidate := filepath.Join(home, "ntc-templates", "ntc_templates", "templates")
-			if _, statErr := os.Stat(candidate); statErr == nil {
-				templateDir = candidate
+	dir, err := ntcTemplateDir()
+	if err != nil {
+		return "", err
+	}
+
+	plat := normalizeNTCPlatform(platform)
+	cmd := normalizeCommand(command)
+
+	if entries, err := loadNTCIndex(dir); err == nil {
+		for _, e := range entries {
+			if e.platform != plat || !e.command.MatchString(cmd) {
+				continue
+			}
+			path := filepath.Join(dir, e.template)
+			if _, statErr := os.Stat(path); statErr == nil {
+				return path, nil
 			}
 		}
 	}
-	if templateDir == "" {
-		return "", fmt.Errorf("NET_TEXTFSM directory not found; set NET_TEXTFSM environment variable")
+
+	name := fmt.Sprintf("%s_%s.textfsm", plat, strings.ReplaceAll(cmd, " ", "_"))
+	full := filepath.Join(dir, name)
+	if _, statErr := os.Stat(full); statErr == nil {
+		return full, nil
 	}
-
-	cmdClean := strings.ToLower(strings.TrimSpace(command))
-	cmdParts := strings.Fields(cmdClean)
-	templateName := fmt.Sprintf("%s_%s.textfsm", strings.ToLower(platform), strings.Join(cmdParts, "_"))
-
-	fullPath := filepath.Join(templateDir, templateName)
-	if _, err := os.Stat(fullPath); err == nil {
-		return fullPath, nil
-	}
-
-	return "", fmt.Errorf("template %q not found in %s", templateName, templateDir)
+	return "", fmt.Errorf("no NTC template matches platform %q and command %q in %s", platform, command, dir)
 }
 
 // SendCommandStructured sends a command to the device and parses the output into structured data.
