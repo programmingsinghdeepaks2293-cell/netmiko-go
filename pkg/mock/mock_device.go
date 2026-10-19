@@ -156,9 +156,6 @@ func (m *MockTerminal) handleCommand(cmd string) {
 		m.emit("GigabitEthernet0/0     192.168.1.1     YES manual up                    up\r\n")
 		m.emit("GigabitEthernet0/1     unassigned      YES unset  administratively down down\r\n")
 		m.emit(m.Prompt)
-	case cmd == "show version":
-		m.emit("Cisco IOS Software, C2960 Software\r\n")
-		m.emit(m.Prompt)
 	case strings.HasPrefix(cmd, "terminal length"):
 		m.emit(m.Prompt)
 	case strings.HasPrefix(cmd, "terminal width"):

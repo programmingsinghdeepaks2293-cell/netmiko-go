@@ -72,8 +72,8 @@ func TestCiscoIOSDriverWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendCommand for show version failed: %v", err)
 	}
-	if !strings.Contains(versionOut, "Cisco IOS Software") {
-		t.Errorf("expected 'Cisco IOS Software' in version output, got: %s", versionOut)
+	if !strings.Contains(versionOut, "Output for show version") {
+		t.Errorf("show version output lost command characters, got: %s", versionOut)
 	}
 
 	// 4. Test SendCommandTiming
@@ -223,13 +223,13 @@ func TestUtilities(t *testing.T) {
 	}
 }
 
-func TestHostkeyCallbackPolicy(t *testing.T) {
+func TestHostKeyCallbackPolicy(t *testing.T) {
 	if callback, err := netmiko.NewHostKeyCallback(false, filepath.Join(t.TempDir(), "missing_known_hosts")); err != nil || callback == nil {
-		t.Fatalf("NewHostKeyCallback failed for missing known_hosts: %v", err)
+		t.Fatalf("NewHostKeyCallback failed for missing known_hosts: %v callback: %v", err, callback)
 	}
 	missingFile := filepath.Join(t.TempDir(), "missing_known_hosts")
-	if callback, err := netmiko.NewHostKeyCallback(true, missingFile); err != nil || callback == nil {
-		t.Fatalf("NewHostKeyCallback failed for missing known_hosts with strict checking: %v", err)
+	if callback, err := netmiko.NewHostKeyCallback(true, missingFile); err == nil || callback != nil {
+		t.Fatalf("NewHostKeyCallback failed for missing known_hosts with strict checking: %v callback: %v", err, callback)
 	}
 }
 

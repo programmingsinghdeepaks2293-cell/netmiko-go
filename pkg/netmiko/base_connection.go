@@ -413,9 +413,11 @@ func (bc *BaseConnection) SendCommand(command string, opts ...CommandOption) (st
 			_, _ = bc.SetBasePrompt()
 		}
 		if bc.BasePrompt != "" {
-			pattern = regexp.MustCompile(regexp.QuoteMeta(bc.BasePrompt) + `[^\n]*[#>$%]\s*$`)
+			pattern = regexp.MustCompile(regexp.QuoteMeta(bc.BasePrompt) + `[
+^\n]*[#>$%]\s*$`)
 		} else {
-			pattern = regexp.MustCompile(`[^\n]*[#>$%]\s*$`)
+			pattern = regexp.MustCompile(`[
+^\n]*[#>$%]\s*$`)
 		}
 	}
 
