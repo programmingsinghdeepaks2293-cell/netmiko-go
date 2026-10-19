@@ -21,7 +21,7 @@ func main() {
 		DeviceType: "linux",
 		Host:       os.Getenv("TARGET_HOST"),
 		Port:       22,
-		Username:   "t_auto",
+		Username:   "tauto",
 		Password:   password,
 		Timeout:    30 * time.Second,
 	}
