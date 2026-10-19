@@ -24,7 +24,5 @@ func (l *LinuxSSH) Connect(ctx context.Context) error {
 	if _, err := l.SetBasePrompt(); err != nil {
 		return err
 	}
-	_, _ = l.SendCommand("stty -echo")
-	_, _ = l.SendCommand("stty cols 500 rows 500")
 	return nil
 }

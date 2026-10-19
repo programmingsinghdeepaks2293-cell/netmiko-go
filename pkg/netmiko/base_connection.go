@@ -8,17 +8,53 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // Transport abstracts the interactive byte stream (SSH channel or mock).
 type Transport interface {
 	io.ReadWriteCloser
+}
+
+// NewHostKeyCallback returns a HostKeyCallback that verifies the server's host key against known_hosts.
+// defult unkown host keys are accepted; strict mode validates against known_hosts file.
+// supplied known_hosts file or ~/.ssh/known_hosts is used if strict mode is enabled.
+func NewHostKeyCallback(strict bool, knownHostsFile string) (ssh.HostKeyCallback, error) {
+	if !strict {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+
+	if knownHostsFile == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve home directory for known_hosts: %w", err)
+		}
+		knownHostsFile = filepath.Join(home, ".ssh", "known_hosts")
+	} else if strings.HasPrefix(knownHostsFile, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve home directory for known_hosts: %w", err)
+		}
+		knownHostsFile = filepath.Join(home, strings.TrimPrefix(knownHostsFile, "~/"))
+	}
+
+	callback, err := knownhosts.New(os.ExpandEnv(knownHostsFile))
+	if err != nil {
+		return nil, fmt.Errorf("load known_hosts file %q: %w", knownHostsFile, err)
+	}
+	return callback, nil
+}
+
+type transportReadResult struct {
+	data []byte
+	err  error
 }
 
 // SSHTransport wraps a real crypto/ssh Client and Session.
@@ -66,6 +102,7 @@ type BaseConnection struct {
 	DefaultPromptTerm string // e.g. "#", ">", "$"
 	mu                sync.Mutex
 	readBuf           bytes.Buffer
+	pendingRead       <-chan transportReadResult
 }
 
 // NewBaseConnection creates a BaseConnection initialized with Device options.
@@ -132,10 +169,14 @@ func (bc *BaseConnection) Connect(ctx context.Context) error {
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
 
+	hostKeyCallback, err := NewHostKeyCallback(bc.Device.SSHStrictHostKeyChecking, bc.Device.SSHKnownHostsFile)
+	if err != nil {
+		return err
+	}
 	sshConfig := &ssh.ClientConfig{
 		User:            bc.Device.Username,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Standard for network devices
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         bc.Device.Timeout,
 	}
 
@@ -258,12 +299,38 @@ func (bc *BaseConnection) ReadUntilPattern(pattern *regexp.Regexp, timeout time.
 		}
 	}
 
-	temp := make([]byte, 2048)
 	for time.Now().Before(deadline) {
-		// Attempt non-blocking / short-timeout read
-		n, err := bc.Transport.Read(temp)
-		if n > 0 {
-			chunk := temp[:n]
+		// A real SSH stdout pipe may block inside Read, so perform the read in
+		// a groroutine and race it against the remaining command timeout.
+		var readResult <-chan transportReadResult
+		if bc.pendingRead != nil {
+			readResult = bc.pendingRead
+			bc.pendingRead = nil
+		} else {
+			resultChan := make(chan transportReadResult, 1)
+			readResult = resultChan
+			transport := bc.Transport
+			go func() {
+				buf := make([]byte, 2048)
+				n, err := transport.Read(buf)
+				resultChan <- transportReadResult{data: append([]byte(nil), buf[:n]...), err: err}
+			}()
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			bc.pendingRead = readResult
+			break
+		}
+		var result transportReadResult
+		select {
+		case result = <-readResult:
+		case <-time.After(remaining):
+			bc.pendingRead = readResult
+			return output.String(), fmt.Errorf("timed out after %v waiting for pattern %q (output: %q)", timeout, pattern.String(), output.String())
+		}
+		if len(result.data) > 0 {
+			chunk := result.data
 			if bc.Device.SessionLog != nil {
 				_, _ = bc.Device.SessionLog.Write(chunk)
 			}
@@ -272,8 +339,8 @@ func (bc *BaseConnection) ReadUntilPattern(pattern *regexp.Regexp, timeout time.
 				return output.String(), nil
 			}
 		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			return output.String(), err
+		if result.err != nil && !errors.Is(result.err, io.EOF) {
+			return output.String(), result.err
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -283,23 +350,18 @@ func (bc *BaseConnection) ReadUntilPattern(pattern *regexp.Regexp, timeout time.
 
 // ReadUntilPrompt reads until the base prompt or standard termination pattern is seen.
 func (bc *BaseConnection) ReadUntilPrompt(timeout time.Duration) (string, error) {
-	var p string
-	if bc.BasePrompt == "" {
-		p = `[#>$%]\s*$`
-	} else {
-		p = regexp.QuoteMeta(bc.BasePrompt) + `.*[#>$%]\s*$`
-	}
-	re := regexp.MustCompile(p)
+	re := regexp.MustCompile(`(?:^|[\r\n])[^\r\n]*[#>$%]\s*$`)
 	return bc.ReadUntilPattern(re, timeout)
 }
 
 // FindPrompt sends a carriage return and discovers the current terminal prompt.
 func (bc *BaseConnection) FindPrompt() (string, error) {
-	// Send newline to awaken prompt
+	// Send a newline to awaken the prompt before waiting for it.
+	promptRegex := regexp.MustCompile(`(?:^|[\r\n])([^\r\n]*[#>$%])\s*$`)
 	if err := bc.WriteChannel("\n"); err != nil {
 		return "", err
 	}
-	promptRegex := regexp.MustCompile(`(?:^|[\r\n]+)\s*([a-zA-Z0-9_\-\.\:\(\)]+[#>$%])\s*$`)
+
 	out, err := bc.ReadUntilPattern(promptRegex, 5*time.Second)
 	if err != nil {
 		// Fallback: strip line breaks and return last line
@@ -350,7 +412,11 @@ func (bc *BaseConnection) SendCommand(command string, opts ...CommandOption) (st
 		if bc.BasePrompt == "" {
 			_, _ = bc.SetBasePrompt()
 		}
-		pattern = regexp.MustCompile(regexp.QuoteMeta(bc.BasePrompt) + `.*[#>$%]\s*$`)
+		if bc.BasePrompt != "" {
+			pattern = regexp.MustCompile(regexp.QuoteMeta(bc.BasePrompt) + `[^\n]*[#>$%]\s*$`)
+		} else {
+			pattern = regexp.MustCompile(`[^\n]*[#>$%]\s*$`)
+		}
 	}
 
 	// Send command
@@ -379,12 +445,50 @@ func (bc *BaseConnection) SendCommandTiming(command string, idleTimeout time.Dur
 	var output bytes.Buffer
 	deadline := time.Now().Add(bc.Device.Timeout)
 	lastDataTime := time.Now()
-	temp := make([]byte, 2048)
 
 	for time.Now().Before(deadline) {
-		n, err := bc.Transport.Read(temp)
-		if n > 0 {
-			chunk := temp[:n]
+		var readResult <-chan transportReadResult
+		if bc.pendingRead != nil {
+			readResult = bc.pendingRead
+			bc.pendingRead = nil
+		} else {
+			resultChan := make(chan transportReadResult, 1)
+			readResult = resultChan
+			transport := bc.Transport
+			go func() {
+				buf := make([]byte, 2048)
+				n, err := transport.Read(buf)
+				resultChan <- transportReadResult{data: append([]byte(nil), buf[:n]...), err: err}
+			}()
+		}
+
+		wait := time.Until(deadline)
+		if output.Len() > 0 {
+			if idleRemaining := idleTimeout - time.Since(lastDataTime); idleRemaining < wait {
+				wait = idleRemaining
+			}
+		}
+		if wait <= 0 {
+			break
+		}
+
+		timer := time.NewTimer(wait)
+		var result transportReadResult
+		select {
+		case result = <-readResult:
+		case <-timer.C:
+			bc.pendingRead = readResult
+			return CleanOutput(command, output.String(), true, true), nil
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+
+		if len(result.data) > 0 {
+			chunk := result.data
 			output.Write(chunk)
 			if bc.Device.SessionLog != nil {
 				_, _ = bc.Device.SessionLog.Write(chunk)
@@ -394,7 +498,7 @@ func (bc *BaseConnection) SendCommandTiming(command string, idleTimeout time.Dur
 		if time.Since(lastDataTime) > idleTimeout && output.Len() > 0 {
 			break
 		}
-		if err != nil && !errors.Is(err, io.EOF) {
+		if result.err != nil && !errors.Is(result.err, io.EOF) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)

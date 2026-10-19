@@ -98,7 +98,30 @@ func main() {
 
 ---
 
-### 2. Pushing Configuration Changes (`SendConfigSet`)
+### 2. Connecting Through an SSH Jumphost[cite: 9]
+
+The [`examples/ssh_jumphost`](examples/ssh_jumphost) example connects to a bastion, opens a second SSH connection to a Cisco IOS device through it, and runs `show version`. It uses the existing interactive Cisco driver and does not store credentials in source control[cite: 9].
+
+Set these environment variables before running it[cite: 9]:
+
+```bash
+export JUMP_HOST=jump.example.com
+export JUMP_PORT=22                            # optional; defaults to 22
+export JUMP_USER=jump-user
+export JUMP_PASSWORD='jump-password'
+export TARGET_HOST=router.example.com
+export TARGET_PORT=22                          # optional; defaults to 22
+export TARGET_USER=router-user
+export TARGET_PASSWORD='router-password'
+export SSH_STRICT=true                         # optional; defaults to false
+export SSH_KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts" # optional; default shown
+go run ./examples/ssh_jumphost
+```
+
+The example uses relaxed host-key behavior by default, matching Python Netmiko's default. Set `SSH_STRICT=true` to reject unknown or changed host keys. Strict mode reads `SSH_KNOWN_HOSTS_FILE`, or `~/.ssh/known_hosts` when that variable is omitted. The same known-hosts policy is applied to both the jumphost and Cisco target connections.
+
+---
+### 3. Pushing Configuration Changes (`SendConfigSet`)
 
 ```go
 commands := []string{
@@ -118,7 +141,7 @@ fmt.Println("Config output:\n", output)
 
 ---
 
-### 3. Concurrent Multi-Device Automation with Goroutines (`ExecuteConcurrently`)
+### 4. Concurrent Multi-Device Automation with Goroutines (`ExecuteConcurrently`)
 
 Automate hundreds of network switches concurrently using a built-in goroutine worker pool:
 
@@ -148,7 +171,7 @@ for host, res := range results {
 
 ---
 
-### 4. Structured Data Parsing with TextFSM & NTC Templates
+### 5. Structured Data Parsing with TextFSM & NTC Templates
 
 Convert unstructured CLI text into strongly typed slices of maps (`[]map[string]any`) using TextFSM templates:
 
@@ -177,7 +200,7 @@ You can also point to an external NTC-templates directory by setting the `NET_TE
 
 ---
 
-### 5. Session Logging
+### 6. Session Logging
 
 You can capture all raw input and output streams for auditing or debugging by setting `SessionLog`:
 

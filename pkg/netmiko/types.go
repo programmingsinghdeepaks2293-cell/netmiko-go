@@ -9,17 +9,19 @@ import (
 
 // Device contains all parameters required to establish and manage a connection.
 type Device struct {
-	DeviceType        string        `json:"device_type" yaml:"device_type"`
-	Host              string        `json:"host" yaml:"host"`
-	Port              int           `json:"port" yaml:"port"`
-	Username          string        `json:"username" yaml:"username"`
-	Password          string        `json:"password" yaml:"password"`
-	Secret            string        `json:"secret,omitempty" yaml:"secret,omitempty"` // Enable password
-	Timeout           time.Duration `json:"timeout" yaml:"timeout"`
-	GlobalDelayFactor float64       `json:"global_delay_factor" yaml:"global_delay_factor"`
-	SessionLog        io.Writer     `json:"-" yaml:"-"`
-	FastCLI           bool          `json:"fast_cli" yaml:"fast_cli"`
-	SSHKeyPath        string        `json:"ssh_key_path,omitempty" yaml:"ssh_key_path,omitempty"`
+	DeviceType               string        `json:"device_type" yaml:"device_type"`
+	Host                     string        `json:"host" yaml:"host"`
+	Port                     int           `json:"port" yaml:"port"`
+	Username                 string        `json:"username" yaml:"username"`
+	Password                 string        `json:"password" yaml:"password"`
+	Secret                   string        `json:"secret,omitempty" yaml:"secret,omitempty"` // Enable password
+	Timeout                  time.Duration `json:"timeout" yaml:"timeout"`
+	GlobalDelayFactor        float64       `json:"global_delay_factor" yaml:"global_delay_factor"`
+	SessionLog               io.Writer     `json:"-" yaml:"-"`
+	FastCLI                  bool          `json:"fast_cli" yaml:"fast_cli"`
+	SSHKeyPath               string        `json:"ssh_key_path,omitempty" yaml:"ssh_key_path,omitempty"`
+	SSHStrictHostKeyChecking bool          `json:"ssh_strict_host_key_checking" yaml:"ssh_strict_host_key_checking"`
+	SSHKnownHostsFile        string        `json:"ssh_known_hosts_file,omitempty" yaml:"ssh_known_hosts_file,omitempty"`
 }
 
 // DefaultDevice returns a Device struct with reasonable defaults.

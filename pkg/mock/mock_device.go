@@ -15,6 +15,7 @@ type MockTerminal struct {
 	outBuf       bytes.Buffer
 	Prompt       string
 	Hostname     string
+	Linux        bool
 	InPrivileged bool
 	InConfig     bool
 	closed       bool
@@ -34,7 +35,21 @@ func NewMockCiscoTerminal(hostname string) *MockTerminal {
 	return m
 }
 
+func NewMockLinuxTerminal(username, hostname string) *MockTerminal {
+	m := &MockTerminal{
+		Hostname:   hostname,
+		Linux:      true,
+		Prompt:     username + "@" + hostname + ":~$ ",
+		readNotify: make(chan struct{}, 100),
+	}
+	m.emit(m.Prompt)
+	return m
+}
+
 func (m *MockTerminal) updatePrompt() {
+	if m.Linux {
+		return
+	}
 	if m.InConfig {
 		m.Prompt = m.Hostname + "(config)# "
 	} else if m.InPrivileged {
@@ -141,10 +156,15 @@ func (m *MockTerminal) handleCommand(cmd string) {
 		m.emit("GigabitEthernet0/0     192.168.1.1     YES manual up                    up\r\n")
 		m.emit("GigabitEthernet0/1     unassigned      YES unset  administratively down down\r\n")
 		m.emit(m.Prompt)
+	case cmd == "show version":
+		m.emit("Cisco IOS Software, C2960 Software\r\n")
+		m.emit(m.Prompt)
 	case strings.HasPrefix(cmd, "terminal length"):
 		m.emit(m.Prompt)
 	case strings.HasPrefix(cmd, "terminal width"):
 		m.emit(m.Prompt)
+	case cmd == "pwd" && m.Linux:
+		m.emit("/home/" + strings.SplitN(m.Prompt, "@", 2)[0] + "\r\n" + m.Prompt)
 	default:
 		// Generic command response
 		m.emit("Output for " + cmd + "\r\n" + m.Prompt)

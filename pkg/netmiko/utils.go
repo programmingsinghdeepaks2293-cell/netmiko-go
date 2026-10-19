@@ -33,9 +33,10 @@ func StripCommand(command, response string) string {
 		return response
 	}
 
-	// Check if first line matches or contains command
+	// Remove only actual ecohed command. A substring match can remove
+	// legitimate output if the command is a substring of the output.
 	firstLine := strings.TrimSpace(lines[0])
-	if strings.Contains(firstLine, cmdNorm) {
+	if firstLine == cmdNorm {
 		return strings.Join(lines[1:], "\n")
 	}
 	return respNorm

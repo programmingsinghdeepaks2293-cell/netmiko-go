@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,14 @@ func TestCiscoIOSDriverWorkflow(t *testing.T) {
 	}
 	if strings.Contains(out, "switch1#") {
 		t.Errorf("output should have trailing prompt stripped, got: %s", out)
+	}
+
+	versionOut, err := driver.SendCommand("show version")
+	if err != nil {
+		t.Fatalf("SendCommand for show version failed: %v", err)
+	}
+	if !strings.Contains(versionOut, "Cisco IOS Software") {
+		t.Errorf("expected 'Cisco IOS Software' in version output, got: %s", versionOut)
 	}
 
 	// 4. Test SendCommandTiming
@@ -157,7 +166,7 @@ func TestJuniperJunosDriver(t *testing.T) {
 }
 
 func TestLinuxDriver(t *testing.T) {
-	mockTerm := mock.NewMockCiscoTerminal("ubuntu-srv")
+	mockTerm := mock.NewMockLinuxTerminal("ubuntu", "ubuntu-srv")
 	dev := netmiko.Device{
 		DeviceType: "linux",
 		Host:       "10.3.3.1",
@@ -175,8 +184,19 @@ func TestLinuxDriver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Linux FindPrompt failed: %v", err)
 	}
-	if !strings.Contains(prompt, "ubuntu-srv") {
-		t.Errorf("expected prompt containing 'ubuntu-srv', got %q", prompt)
+	if !strings.Contains(prompt, "ubuntu@ubuntu-srv:~$") {
+		t.Errorf("expected prompt containing 'ubuntu@ubuntu-srv', got %q", prompt)
+	}
+
+	out, err := driver.SendCommand("pwd")
+	if err != nil {
+		t.Fatalf("SendCommand failed: %v", err)
+	}
+	if !strings.Contains(out, "/home/ubuntu") {
+		t.Errorf("expected '/home/ubuntu' in output, got: %s", out)
+	}
+	if strings.Contains(out, "ubuntu@ubuntu-srv:~$") {
+		t.Errorf("output should have trailing prompt stripped, got: %s", out)
 	}
 }
 
@@ -200,6 +220,16 @@ func TestUtilities(t *testing.T) {
 	cleaned := netmiko.CleanOutput("show ip int br", cmdOutput, true, true)
 	if cleaned != "Interface  IP-Address  Status" {
 		t.Errorf("CleanOutput failed, got: %q", cleaned)
+	}
+}
+
+func TestHostkeyCallbackPolicy(t *testing.T) {
+	if callback, err := netmiko.NewHostKeyCallback(false, filepath.Join(t.TempDir(), "missing_known_hosts")); err != nil || callback == nil {
+		t.Fatalf("NewHostKeyCallback failed for missing known_hosts: %v", err)
+	}
+	missingFile := filepath.Join(t.TempDir(), "missing_known_hosts")
+	if callback, err := netmiko.NewHostKeyCallback(true, missingFile); err != nil || callback == nil {
+		t.Fatalf("NewHostKeyCallback failed for missing known_hosts with strict checking: %v", err)
 	}
 }
 
