@@ -25,8 +25,8 @@ type jumpTransport struct {
 	stdout       io.Reader
 }
 
-func (t *jumpTransport) Read(b []byte) (int, error)  { return t.stdout.Read(b) }
-func (t *jumpTransport) Write(b []byte) (int, error) { return t.stdin.Write(b) }
+func (t *jumpTransport) Read(p []byte) (int, error)  { return t.stdout.Read(p) }
+func (t *jumpTransport) Write(p []byte) (int, error) { return t.stdin.Write(p) }
 
 func (t *jumpTransport) Close() error {
 	if t.stdin != nil {
@@ -77,7 +77,7 @@ func boolEnv(name string, fallback bool) bool {
 }
 
 func passwordConfig(user, password string, timeout time.Duration, strict bool, knownHostsFile string) (*ssh.ClientConfig, error) {
-	hostkeyCallback, err := netmiko.NewHostKeyCallback(strict, knownHostsFile)
+	hostKeyCallback, err := netmiko.NewHostKeyCallback(strict, knownHostsFile)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func passwordConfig(user, password string, timeout time.Duration, strict bool, k
 		Auth: []ssh.AuthMethod{
 			ssh.Password(password),
 		},
-		HostKeyCallback: hostkeyCallback,
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         timeout,
 	}, nil
 }
@@ -145,7 +145,7 @@ func openJumpTransport(jumpHost string, jumpPort int, jumpUser, jumpPassword str
 		ssh.TTY_OP_OSPEED: 14400,
 	}
 	if err := session.RequestPty("vt100", 120, 40, modes); err != nil {
-		session.Close()
+		_ = session.Close()
 		closeTarget()
 		return nil, fmt.Errorf("request target PTY: %w", err)
 	}
